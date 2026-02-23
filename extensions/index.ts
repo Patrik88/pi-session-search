@@ -5,18 +5,16 @@
  * Ctrl+F or /search opens an overlay palette to search, preview, resume, or
  * summarize past sessions.
  *
- * In the search view:
- *   - Type to search (debounced)
- *   - ↑/↓ to navigate results
- *   - Enter to preview snippets
- *   - Ctrl+R to resume selected session
- *   - Ctrl+S to summarize & inject
- *   - Escape to close
+ * Search view:
+ *   - Type to search (debounced, prefix-matched)
+ *   - ↑/↓ navigate results
+ *   - Enter → preview & actions
+ *   - Escape → close
  *
- * In the preview view:
- *   - Ctrl+R to resume
- *   - Ctrl+S to summarize & inject
- *   - Escape / Backspace to go back
+ * Preview/actions view:
+ *   - Tab to cycle action: Resume / Summarize / Back
+ *   - Enter to execute selected action
+ *   - Escape → back to search
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -64,7 +62,6 @@ function shortenProject(project: string, maxLen: number): string {
 	return project.slice(0, maxLen);
 }
 
-/** Clean FTS snippet markers for display. */
 function cleanSnippet(snippet: string): string {
 	return snippet.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -76,15 +73,14 @@ function cleanSnippet(snippet: string): string {
 const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
 const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
-const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
 const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
 const italic = (s: string) => `\x1b[3m${s}\x1b[23m`;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Box drawing — shared between search and preview
+// Box drawing
 // ═══════════════════════════════════════════════════════════════════════════
 
-function makeBoxHelpers(innerW: number) {
+function makeBox(innerW: number) {
 	function row(content = ""): string {
 		const clipped = truncateToWidth(content, innerW - 1, "");
 		const vis = visibleWidth(clipped);
@@ -122,8 +118,10 @@ function makeBoxHelpers(innerW: number) {
 type PaletteAction =
 	| { type: "cancel" }
 	| { type: "resume"; session: SearchResult }
-	| { type: "summarize"; session: SearchResult }
-	| { type: "preview"; session: SearchResult; query: string };
+	| { type: "summarize"; session: SearchResult };
+
+type PreviewAction = "resume" | "summarize" | "back";
+const PREVIEW_ACTIONS: PreviewAction[] = ["resume", "summarize", "back"];
 
 interface SearchState {
 	query: string;
@@ -132,6 +130,7 @@ interface SearchState {
 	mode: "search" | "preview";
 	previewSnippets: string[];
 	previewSession: SearchResult | null;
+	previewAction: number; // index into PREVIEW_ACTIONS
 	debounceTimer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -141,7 +140,7 @@ function createSearchComponent(
 ) {
 	const BOX_WIDTH = 82;
 	const innerW = BOX_WIDTH - 2;
-	const { row, emptyRow, divider, topBorder, bottomBorder } = makeBoxHelpers(innerW);
+	const { row, emptyRow, divider, topBorder, bottomBorder } = makeBox(innerW);
 
 	const state: SearchState = {
 		query: "",
@@ -150,6 +149,7 @@ function createSearchComponent(
 		mode: "search",
 		previewSnippets: [],
 		previewSession: null,
+		previewAction: 0,
 		debounceTimer: null,
 	};
 
@@ -195,33 +195,28 @@ function createSearchComponent(
 			state.previewSnippets = ["Failed to load snippets"];
 		}
 		state.previewSession = session;
+		state.previewAction = 0;
 		state.mode = "preview";
 		tui.requestRender();
 	}
 
-	function selectedSession(): SearchResult | null {
-		if (state.mode === "preview") return state.previewSession;
-		if (state.results.length === 0) return null;
-		return state.results[state.selected];
-	}
-
 	/** Replace →text← FTS markers with bold yellow highlights. */
-	function highlightMatches(text: string): string {
-		return text.replace(/→([^←]*)←/g, (_match, p1) => bold(yellow(p1)));
+	function hl(text: string): string {
+		return text.replace(/→([^←]*)←/g, (_m, p1) => bold(yellow(p1)));
 	}
 
-	function wrapText(text: string, maxW: number): string[] {
+	function wrapText(text: string, maxW: number, maxLines = 3): string[] {
 		if (visibleWidth(text) <= maxW) return [text];
 		const result: string[] = [];
 		let remaining = text;
-		for (let i = 0; i < 4 && remaining.length > 0; i++) {
-			result.push(truncateToWidth(remaining, maxW, i < 3 ? "" : "…"));
+		for (let i = 0; i < maxLines && remaining.length > 0; i++) {
+			result.push(truncateToWidth(remaining, maxW, i < maxLines - 1 ? "" : "…"));
 			remaining = remaining.slice(maxW);
 		}
 		return result;
 	}
 
-	// ── Render ────────────────────────────────────────────────────────
+	// ── Render search ─────────────────────────────────────────────────
 
 	function renderSearch(): string[] {
 		const lines: string[] = [];
@@ -236,13 +231,10 @@ function createSearchComponent(
 			: `${cursor}${dim(italic("type to search sessions..."))}`;
 		lines.push(row(`  ${dim("◎")} ${queryDisplay}`));
 
-		// Stats line
 		try {
 			const stats = getStats();
 			lines.push(row(dim(`    ${stats.totalSessions} sessions indexed`)));
-		} catch {
-			// ignore
-		}
+		} catch { /* */ }
 
 		lines.push(emptyRow());
 		lines.push(divider());
@@ -266,18 +258,26 @@ function createSearchComponent(
 			lines.push(emptyRow());
 
 			for (let i = startIdx; i < endIdx; i++) {
-				const result = state.results[i];
+				const r = state.results[i];
 				const isSel = i === state.selected;
 				const prefix = isSel ? cyan("▸") : dim("·");
 
-				const dateStr = formatDate(result.timestamp);
-				const projectStr = shortenProject(result.project, 28);
+				const dateStr = formatDate(r.timestamp);
+				const projectStr = shortenProject(r.project, 24);
 
+				// Line 1: project + date
 				const header = `${prefix} ${isSel ? bold(cyan(projectStr)) : projectStr}  ${dim(dateStr)}`;
 				lines.push(row(`  ${header}`));
 
-				// Snippet with highlights
-				const snippet = highlightMatches(cleanSnippet(result.snippet));
+				// Line 2: session title (first user message) — differentiates sessions from same project
+				if (r.title) {
+					const titleMaxW = innerW - 8;
+					const titleClean = r.title.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+					lines.push(row(`    ${dim(italic(truncateToWidth(titleClean, titleMaxW, "…")))}`));
+				}
+
+				// Line 3: matched snippet with highlights
+				const snippet = hl(cleanSnippet(r.snippet));
 				const snippetMaxW = innerW - 8;
 				lines.push(row(`    ${truncateToWidth(snippet, snippetMaxW, "…")}`));
 
@@ -292,86 +292,72 @@ function createSearchComponent(
 		}
 
 		lines.push(divider());
-
-		const help =
-			`${dim(italic("↑↓"))} ${dim("nav")}  ` +
-			`${dim(italic("enter"))} ${dim("preview")}  ` +
-			`${dim(italic("^R"))} ${dim("resume")}  ` +
-			`${dim(italic("^S"))} ${dim("summarize")}  ` +
-			`${dim(italic("esc"))} ${dim("close")}`;
-		lines.push(row(help));
+		lines.push(
+			row(`${dim(italic("↑↓"))} ${dim("nav")}  ${dim(italic("enter"))} ${dim("select")}  ${dim(italic("esc"))} ${dim("close")}`)
+		);
 		lines.push(bottomBorder());
 
 		return lines;
 	}
+
+	// ── Render preview with action bar ────────────────────────────────
 
 	function renderPreview(): string[] {
 		const lines: string[] = [];
 		const session = state.previewSession!;
 
-		lines.push(topBorder("Preview"));
+		lines.push(topBorder("Session"));
 		lines.push(emptyRow());
 
 		const projectStr = shortenProject(session.project, 40);
 		const dateStr = formatDate(session.timestamp);
 		lines.push(row(`  ${bold(cyan("📂"))} ${bold(cyan(projectStr))}  ${dim(dateStr)}`));
+
+		if (session.title) {
+			const titleClean = session.title.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+			lines.push(row(`  ${dim(italic(truncateToWidth(titleClean, innerW - 6, "…")))}`));
+		}
+
 		lines.push(emptyRow());
 		lines.push(divider());
 		lines.push(emptyRow());
 
 		if (state.previewSnippets.length === 0) {
-			lines.push(row(dim(italic("  No snippets found"))));
+			lines.push(row(dim(italic("  No matching snippets"))));
 		} else {
-			for (let i = 0; i < Math.min(state.previewSnippets.length, 8); i++) {
-				const snippet = highlightMatches(cleanSnippet(state.previewSnippets[i]));
-				const snippetLines = wrapText(snippet, innerW - 8);
+			for (let i = 0; i < Math.min(state.previewSnippets.length, 6); i++) {
+				const snippet = hl(cleanSnippet(state.previewSnippets[i]));
+				const snippetLines = wrapText(snippet, innerW - 8, 3);
 				lines.push(row(`  ${dim(`${i + 1}.`)} ${snippetLines[0] || ""}`));
 				for (let j = 1; j < snippetLines.length; j++) {
 					lines.push(row(`     ${snippetLines[j]}`));
 				}
-				if (i < state.previewSnippets.length - 1) lines.push(emptyRow());
+				if (i < Math.min(state.previewSnippets.length, 6) - 1) lines.push(emptyRow());
 			}
 		}
 
 		lines.push(emptyRow());
 		lines.push(divider());
 
-		const help =
-			`${dim(italic("^R"))} ${dim("resume")}  ` +
-			`${dim(italic("^S"))} ${dim("summarize")}  ` +
-			`${dim(italic("esc"))} ${dim("back")}`;
-		lines.push(row(help));
+		// Action bar — Tab to cycle, Enter to execute
+		const actions = PREVIEW_ACTIONS.map((a, i) => {
+			const label = a === "resume" ? "⏎ Resume" : a === "summarize" ? "📋 Summarize" : "← Back";
+			if (i === state.previewAction) return bold(cyan(`[${label}]`));
+			return dim(`[${label}]`);
+		});
+
+		lines.push(row(`  ${actions.join("  ")}  ${dim(italic("tab"))} ${dim("cycle")}  ${dim(italic("enter"))} ${dim("go")}`));
 		lines.push(bottomBorder());
 
 		return lines;
 	}
 
-	// ── Input ─────────────────────────────────────────────────────────
+	// ── Input handling ────────────────────────────────────────────────
 
 	function handleSearchInput(data: string) {
 		if (matchesKey(data, "escape")) {
 			if (state.debounceTimer) clearTimeout(state.debounceTimer);
 			done({ type: "cancel" });
-			return;
-		}
-
-		// Ctrl+R — resume (won't conflict with typing)
-		if (matchesKey(data, "ctrl+r")) {
-			const s = selectedSession();
-			if (s) {
-				if (state.debounceTimer) clearTimeout(state.debounceTimer);
-				done({ type: "resume", session: s });
-			}
-			return;
-		}
-
-		// Ctrl+S — summarize
-		if (matchesKey(data, "ctrl+s")) {
-			const s = selectedSession();
-			if (s) {
-				if (state.debounceTimer) clearTimeout(state.debounceTimer);
-				done({ type: "summarize", session: s });
-			}
 			return;
 		}
 
@@ -420,18 +406,35 @@ function createSearchComponent(
 			return;
 		}
 
-		if (matchesKey(data, "ctrl+r")) {
-			done({ type: "resume", session: state.previewSession! });
+		if (matchesKey(data, "tab") || matchesKey(data, "left") || matchesKey(data, "right")) {
+			if (matchesKey(data, "left")) {
+				state.previewAction = (state.previewAction - 1 + PREVIEW_ACTIONS.length) % PREVIEW_ACTIONS.length;
+			} else {
+				state.previewAction = (state.previewAction + 1) % PREVIEW_ACTIONS.length;
+			}
+			tui.requestRender();
 			return;
 		}
 
-		if (matchesKey(data, "ctrl+s")) {
-			done({ type: "summarize", session: state.previewSession! });
-			return;
+		if (matchesKey(data, "return")) {
+			const action = PREVIEW_ACTIONS[state.previewAction];
+			if (action === "back") {
+				state.mode = "search";
+				tui.requestRender();
+				return;
+			}
+			if (action === "resume") {
+				done({ type: "resume", session: state.previewSession! });
+				return;
+			}
+			if (action === "summarize") {
+				done({ type: "summarize", session: state.previewSession! });
+				return;
+			}
 		}
 	}
 
-	// ── Component interface ───────────────────────────────────────────
+	// ── Component ─────────────────────────────────────────────────────
 
 	return {
 		render(_width: number): string[] {
@@ -456,25 +459,23 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 	let indexReady = false;
 	let indexing = false;
 
-	/** Run index update in background. */
 	async function ensureIndex(ctx?: ExtensionContext) {
 		if (indexing) return;
 		indexing = true;
 
 		try {
-			const count = updateIndex((msg) => {
+			updateIndex((msg) => {
 				ctx?.ui?.setStatus("session-search", `🔍 ${msg}`);
 			});
 			indexReady = true;
 		} catch {
-			// index failed — will retry on next search
+			// will retry on next search
 		} finally {
 			ctx?.ui?.setStatus("session-search", undefined);
 			indexing = false;
 		}
 	}
 
-	// Index on startup (background, next tick)
 	pi.on("session_start", async (_event, ctx) => {
 		setTimeout(() => ensureIndex(ctx), 100);
 	});
@@ -508,15 +509,11 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 			const sessionPath = action.session.sessionPath;
 			const project = shortenProject(action.session.project, 40);
 
-			// Copy path to clipboard
 			try {
 				const { execSync } = await import("node:child_process");
 				execSync("pbcopy", { input: sessionPath });
-			} catch {
-				// non-fatal
-			}
+			} catch { /* non-fatal */ }
 
-			// Pre-fill /resume in editor
 			ctx.ui.setEditorText(`/resume`);
 			ctx.ui.notify(`${project} — path copied, press Enter for /resume`, "info");
 			return;
@@ -547,13 +544,11 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 		}
 	}
 
-	// Ctrl+F shortcut
 	pi.registerShortcut("ctrl+f", {
 		description: "Search sessions",
 		handler: (ctx) => openSearch(ctx as ExtensionContext),
 	});
 
-	// /search command
 	pi.registerCommand("search", {
 		description: "Full-text search across all pi sessions",
 		handler: async (args, ctx) => {
@@ -587,7 +582,6 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 		},
 	});
 
-	// Custom renderer for session-search-context messages
 	pi.registerMessageRenderer("session-search-context", (message, _options, theme) => {
 		const rawContent =
 			typeof message.content === "string"

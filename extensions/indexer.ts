@@ -19,6 +19,7 @@ export interface SearchResult {
 	timestamp: string;
 	snippet: string;
 	rank: number;
+	title: string | null;
 }
 
 export interface IndexStats {
@@ -356,6 +357,7 @@ export function search(query: string, limit = 20): SearchResult[] {
 			f.session_path,
 			s.project,
 			s.session_ts,
+			s.first_user_message,
 			snippet(session_fts, 0, '→', '←', '…', 40) as snippet,
 			rank
 		FROM session_fts f
@@ -369,6 +371,7 @@ export function search(query: string, limit = 20): SearchResult[] {
 		session_path: string;
 		project: string;
 		session_ts: string;
+		first_user_message: string | null;
 		snippet: string;
 		rank: number;
 	}[];
@@ -383,6 +386,7 @@ export function search(query: string, limit = 20): SearchResult[] {
 				timestamp: row.session_ts,
 				snippet: row.snippet,
 				rank: row.rank,
+				title: row.first_user_message,
 			});
 		}
 	}
