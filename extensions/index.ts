@@ -440,20 +440,113 @@ function createSearchComponent(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Summarize prompt
+// Session summarizer — extracts text, sends directly to OpenRouter
 // ═══════════════════════════════════════════════════════════════════════════
 
-function buildSummarizePrompt(session: SearchResult): string {
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const MODEL = "google/gemini-3-flash-preview";
+const SECRETS_PATH = path.join(os.homedir(), ".session-search", "secrets.json");
+
+let _apiKey: string | null = null;
+function getApiKey(): string {
+	if (_apiKey) return _apiKey;
+	try {
+		const secrets = JSON.parse(fs.readFileSync(SECRETS_PATH, "utf-8"));
+		_apiKey = secrets.apiKey;
+		return _apiKey!;
+	} catch {
+		throw new Error(`No API key found at ${SECRETS_PATH}. Run: /openrouter provision session-search`);
+	}
+}
+
+/** Extract user + assistant text from a session JSONL file. */
+function extractSessionText(sessionPath: string): string {
+	const data = fs.readFileSync(sessionPath, "utf-8");
+	const lines = data.split("\n");
+	const parts: string[] = [];
+
+	for (const line of lines) {
+		if (!line.trim()) continue;
+		let entry: any;
+		try { entry = JSON.parse(line); } catch { continue; }
+		if (entry.type !== "message") continue;
+		const msg = entry.message;
+		if (!msg) continue;
+
+		if (msg.role === "user") {
+			const text = typeof msg.content === "string"
+				? msg.content
+				: (msg.content || [])
+						.filter((c: any) => c.type === "text")
+						.map((c: any) => c.text)
+						.join(" ");
+			if (text.trim()) parts.push(`[USER] ${text.trim()}`);
+		} else if (msg.role === "assistant") {
+			const text = (msg.content || [])
+				.filter((c: any) => c.type === "text")
+				.map((c: any) => c.text)
+				.join(" ");
+			if (text.trim()) parts.push(`[ASSISTANT] ${text.trim()}`);
+		}
+	}
+
+	return parts.join("\n\n");
+}
+
+/**
+ * Summarize a session via Gemini Flash through OpenRouter.
+ * Extracts conversation text first to strip images/thinking/tools,
+ * then sends a single API call. Fast and cheap.
+ */
+async function summarizeSession(session: SearchResult): Promise<string> {
+	const text = extractSessionText(session.sessionPath);
+	if (!text.trim()) return "Empty session — no user or assistant messages found.";
+
 	const project = session.project;
 	const date = formatDate(session.timestamp);
-	return (
-		`I found a relevant past session. Here are the details:\n` +
-		`- **Project:** ${project}\n` +
-		`- **Date:** ${date}\n` +
-		`- **Session file:** ${session.sessionPath}\n\n` +
-		`Please read this session file and provide a concise summary of what was discussed and accomplished. ` +
-		`Focus on the key decisions, outcomes, and any important context that might be relevant now.`
-	);
+
+	const systemPrompt = [
+		`You summarize coding agent sessions. Be concise but thorough.`,
+		`Use markdown headings for distinct topics.`,
+		`Focus on: key decisions, outcomes, what was built/fixed/configured,`,
+		`and important context someone continuing this work would need.`,
+	].join(" ");
+
+	const userPrompt = [
+		`Project: ${project} | Date: ${date}`,
+		``,
+		`Summarize this session:`,
+		``,
+		text,
+	].join("\n");
+
+	const response = await fetch(OPENROUTER_URL, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${getApiKey()}`,
+		},
+		body: JSON.stringify({
+			model: MODEL,
+			messages: [
+				{ role: "system", content: systemPrompt },
+				{ role: "user", content: userPrompt },
+			],
+			max_tokens: 4096,
+		}),
+	});
+
+	if (!response.ok) {
+		const err = await response.text();
+		throw new Error(`OpenRouter ${response.status}: ${err.slice(0, 200)}`);
+	}
+
+	const json = (await response.json()) as any;
+	return json.choices?.[0]?.message?.content?.trim() ?? "No summary generated.";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -493,22 +586,47 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 		closeDb();
 	});
 
-	// When a new session starts and we have pending context, inject it.
-	pi.on("session_switch", async (event, _ctx) => {
+	// When a new session starts and we have pending context, inject the Gemini summary.
+	pi.on("session_switch", async (event, ctx) => {
 		if (event.reason !== "new" || !pendingContext) return;
 
 		const session = pendingContext;
 		pendingContext = null;
 
-		// Inject summarize prompt into the fresh session and trigger the LLM
-		pi.sendMessage(
-			{
-				customType: "session-search-context",
-				content: buildSummarizePrompt(session),
-				display: true,
-			},
-			{ triggerTurn: true }
-		);
+		const project = shortenProject(session.project, 40);
+		ctx.ui.setStatus("session-search", `🔍 Summarizing ${project} via Gemini...`);
+
+		try {
+			const summary = await summarizeSession(session);
+
+			pi.sendMessage(
+				{
+					customType: "session-search-context",
+					content:
+						`## Session Summary: ${session.project}\n` +
+						`**Date:** ${formatDate(session.timestamp)} | **File:** ${session.sessionPath}\n\n` +
+						summary,
+					display: true,
+				},
+				{ triggerTurn: false }
+			);
+		} catch (err) {
+			// Fallback: ask the LLM to read the file directly
+			pi.sendMessage(
+				{
+					customType: "session-search-context",
+					content:
+						`Gemini summary failed. Please read this session file and summarize:\n` +
+						`- **Project:** ${session.project}\n` +
+						`- **Date:** ${formatDate(session.timestamp)}\n` +
+						`- **Session file:** ${session.sessionPath}`,
+					display: true,
+				},
+				{ triggerTurn: true }
+			);
+		} finally {
+			ctx.ui.setStatus("session-search", undefined);
+		}
 	});
 
 	// ── Open search overlay ───────────────────────────────────────────
@@ -547,16 +665,31 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 		}
 
 		if (action.type === "summarize") {
-			ctx.ui.notify(`Summarizing: ${shortenProject(action.session.project, 40)}...`, "info");
+			const project = shortenProject(action.session.project, 40);
+			ctx.ui.setStatus("session-search", `🔍 Summarizing ${project} via Gemini...`);
+			ctx.ui.notify(`Summarizing ${project} via Gemini Flash...`, "info");
 
-			pi.sendMessage(
-				{
-					customType: "session-search-context",
-					content: buildSummarizePrompt(action.session),
-					display: true,
-				},
-				{ triggerTurn: true, deliverAs: "followUp" }
-			);
+			try {
+				const summary = await summarizeSession(action.session);
+
+				pi.sendMessage(
+					{
+						customType: "session-search-context",
+						content:
+							`## Session Summary: ${action.session.project}\n` +
+							`**Date:** ${formatDate(action.session.timestamp)} | **File:** ${action.session.sessionPath}\n\n` +
+							summary,
+						display: true,
+					},
+					{ triggerTurn: false, deliverAs: "followUp" }
+				);
+
+				ctx.ui.notify(`Summary injected from ${project}`, "info");
+			} catch (err) {
+				ctx.ui.notify(`Gemini summary failed: ${err}`, "error");
+			} finally {
+				ctx.ui.setStatus("session-search", undefined);
+			}
 			return;
 		}
 
@@ -611,7 +744,7 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerMessageRenderer("session-search-context", (message, _options, theme) => {
+	pi.registerMessageRenderer("session-search-context", (message, options, theme) => {
 		const rawContent =
 			typeof message.content === "string"
 				? message.content
@@ -621,10 +754,35 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 							.join("")
 					: "";
 
-		const projectMatch = rawContent.match(/\*\*Project:\*\* (.+)/);
-		const dateMatch = rawContent.match(/\*\*Date:\*\* (.+)/);
-		const project = projectMatch?.[1] || "session";
-		const date = dateMatch?.[1] || "";
+		// Parse from "## Session Summary: project" or "**Project:** project" format
+		const summaryMatch = rawContent.match(/Session Summary:\s*(.+)/);
+		const projectMatch = rawContent.match(/\*\*Project:\*\*\s*(.+)/);
+		const dateMatch = rawContent.match(/\*\*Date:\*\*\s*([^|*]+)/);
+		const project = summaryMatch?.[1]?.trim() || projectMatch?.[1]?.trim() || "session";
+		const date = dateMatch?.[1]?.trim() || "";
+
+		if (options.expanded) {
+			// Show full summary when expanded
+			const lines: string[] = [];
+			lines.push(
+				theme.fg("accent", "🔍 ") +
+				theme.fg("customMessageLabel", theme.bold("Session context: ")) +
+				theme.fg("accent", project) +
+				(date ? theme.fg("muted", ` (${date})`) : "")
+			);
+
+			// Extract the summary body (after the header lines)
+			const bodyStart = rawContent.indexOf("\n\n");
+			if (bodyStart >= 0) {
+				const body = rawContent.slice(bodyStart + 2).trim();
+				if (body) {
+					lines.push("");
+					lines.push(theme.fg("muted", body));
+				}
+			}
+
+			return new Text(lines.join("\n"), 0, 0);
+		}
 
 		const header =
 			theme.fg("accent", "🔍 ") +
