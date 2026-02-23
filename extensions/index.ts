@@ -74,23 +74,22 @@ function cleanSnippet(snippet: string): string {
 type Theme = Parameters<Parameters<ExtensionContext["ui"]["custom"]>[0]>[1];
 
 function makeBox(innerW: number, theme: Theme) {
-	const border = (s: string) => theme.fg("border", s);
+	const border = (s: string) => theme.fg("borderAccent", s);
 	const accent = (s: string) => theme.fg("accent", s);
-	const bg = (s: string) => theme.bg("customMessageBg", s);
 
 	function row(content = ""): string {
 		const clipped = truncateToWidth(content, innerW - 1, "");
 		const vis = visibleWidth(clipped);
 		const pad = Math.max(0, innerW - vis - 1);
-		return bg(border("│") + " " + clipped + " ".repeat(pad) + border("│"));
+		return border("│") + " " + clipped + " ".repeat(pad) + border("│");
 	}
 
 	function emptyRow(): string {
-		return bg(border("│") + " ".repeat(innerW) + border("│"));
+		return border("│") + " ".repeat(innerW) + border("│");
 	}
 
 	function divider(): string {
-		return bg(border(`├${"─".repeat(innerW)}┤`));
+		return border(`├${"─".repeat(innerW)}┤`);
 	}
 
 	function topBorder(title: string): string {
@@ -98,11 +97,11 @@ function makeBox(innerW: number, theme: Theme) {
 		const borderLen = Math.max(0, innerW - titleText.length);
 		const left = Math.floor(borderLen / 2);
 		const right = borderLen - left;
-		return bg(border(`╭${"─".repeat(left)}`) + accent(titleText) + border(`${"─".repeat(right)}╮`));
+		return border(`╭${"─".repeat(left)}`) + accent(titleText) + border(`${"─".repeat(right)}╮`);
 	}
 
 	function bottomBorder(): string {
-		return bg(border(`╰${"─".repeat(innerW)}╯`));
+		return border(`╰${"─".repeat(innerW)}╯`);
 	}
 
 	return { row, emptyRow, divider, topBorder, bottomBorder };
@@ -304,7 +303,7 @@ function createSearchComponent(
 
 		lines.push(divider());
 		lines.push(
-			row(`${muted("↑↓")} ${dim("nav")}  ${muted("enter")} ${dim("select")}  ${muted("esc")} ${dim("close")}`)
+			row(`${accent("↑↓")} ${dim("nav")}  ${accent("enter")} ${dim("select")}  ${accent("esc")} ${dim("close")}`)
 		);
 		lines.push(bottomBorder());
 
@@ -356,7 +355,7 @@ function createSearchComponent(
 			return dim(`[${label}]`);
 		});
 
-		lines.push(row(`  ${actions.join(" ")}  ${muted("tab")} ${dim("cycle")}`));
+		lines.push(row(`  ${actions.join(" ")}  ${accent("tab")} ${dim("cycle")}`));
 		lines.push(bottomBorder());
 
 		return lines;
@@ -388,7 +387,7 @@ function createSearchComponent(
 		lines.push(emptyRow());
 		lines.push(divider());
 		lines.push(
-			row(`${muted("enter")} ${dim("default summary")}  ${muted("type")} ${dim("+ enter for custom")}  ${muted("esc")} ${dim("back")}`)
+			row(`${accent("enter")} ${dim("default summary")}  ${accent("type")} ${dim("+ enter for custom")}  ${accent("esc")} ${dim("back")}`)
 		);
 		lines.push(bottomBorder());
 
