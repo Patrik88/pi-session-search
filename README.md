@@ -17,7 +17,7 @@ Full-text search across all pi sessions with a SQLite FTS5 index and overlay UI.
 |---|---|
 | `Ctrl+F` | Open search overlay |
 | `/search` | Open search overlay |
-| `/search reindex` | Force full reindex |
+| `/search reindex` | Clear and rebuild index from scratch |
 | `/search stats` | Show index statistics |
 
 ### In the overlay

@@ -21,6 +21,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { matchesKey, truncateToWidth, visibleWidth, Text } from "@mariozechner/pi-tui";
 import {
 	updateIndex,
+	rebuildIndex,
 	search,
 	getSessionSnippets,
 	getStats,
@@ -566,7 +567,7 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 		indexing = true;
 
 		try {
-			updateIndex((msg) => {
+			await updateIndex((msg) => {
 				ctx?.ui?.setStatus("session-search", `🔍 ${msg}`);
 			});
 			indexReady = true;
@@ -715,12 +716,12 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 		description: "Full-text search across all pi sessions",
 		handler: async (args, ctx) => {
 			if (args?.trim() === "reindex") {
-				ctx.ui.notify("Reindexing all sessions...", "info");
+				ctx.ui.notify("Rebuilding index from scratch...", "info");
 				indexReady = false;
 				try {
-					const count = updateIndex((msg) => ctx.ui.notify(msg, "info"));
+					const count = await rebuildIndex((msg) => ctx.ui.notify(msg, "info"));
 					indexReady = true;
-					ctx.ui.notify(`Reindexed ${count} sessions`, "info");
+					ctx.ui.notify(`Rebuilt index: ${count} sessions`, "info");
 				} catch (err) {
 					ctx.ui.notify(`Reindex failed: ${err}`, "error");
 				}
