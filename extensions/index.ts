@@ -2,7 +2,7 @@
  * pi-session-search — Full-text search across all pi sessions.
  *
  * SQLite FTS5 index built incrementally on session_start.
- * Ctrl+F or /search opens an overlay palette to search, preview, resume, or
+ * Ctrl+F or /session-search opens an overlay palette to search, preview, resume, or
  * summarize past sessions into a new session.
  */
 
@@ -145,7 +145,7 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 				return;
 			}
 
-			ctx.ui.setEditorText(`/search resume ${quoteCommandArg(sessionPath)}`);
+			ctx.ui.setEditorText(`/session-search resume ${quoteCommandArg(sessionPath)}`);
 			ctx.ui.notify(
 				`${project} — press Enter to resume this session`,
 				"info",
@@ -216,7 +216,7 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 		handler: (ctx) => openSearch(ctx as ExtensionContext),
 	});
 
-	pi.registerCommand("search", {
+	pi.registerCommand("session-search", {
 		description: "Full-text search across all pi sessions",
 		handler: async (args, ctx) => {
 			const trimmedArgs = args?.trim() ?? "";
@@ -224,7 +224,7 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 
 			if (resumePath !== null) {
 				if (!resumePath) {
-					ctx.ui.notify("Usage: /search resume <sessionPath>", "warning");
+					ctx.ui.notify("Usage: /session-search resume <sessionPath>", "warning");
 					return;
 				}
 

@@ -35,13 +35,15 @@ Then restart pi or run `/reload`.
 
 ## Usage
 
+> Command namespace uses `/session-search` to avoid `/search` collisions with other extensions.
+
 | Shortcut / Command | Action |
 |---|---|
 | `Ctrl+F` | Open search overlay |
-| `/search` | Open search overlay |
-| `/search resume <sessionPath>` | Resume a specific session by file path |
-| `/search reindex` | Clear and rebuild index from scratch |
-| `/search stats` | Show index statistics |
+| `/session-search` | Open search overlay |
+| `/session-search resume <sessionPath>` | Resume a specific session by file path |
+| `/session-search reindex` | Clear and rebuild index from scratch |
+| `/session-search stats` | Show index statistics |
 
 ### Search screen
 
